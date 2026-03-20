@@ -1,5 +1,24 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
+const SUPABASE_URL = "https://qkdorvgmqfruqpbpkmnm.supabase.co";
+const SUPABASE_KEY = "qkdorvgmqfruqpbpkmnm";
+
+const sbGet = async (key) => {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/shared_data?key=eq.${encodeURIComponent(key)}&select=value`, {
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+  });
+  const data = await res.json();
+  return data?.[0]?.value ? JSON.parse(data[0].value) : null;
+};
+
+const sbSet = async (key, value) => {
+  await fetch(`${SUPABASE_URL}/rest/v1/shared_data`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify({ key, value: JSON.stringify(value), updated_at: new Date().toISOString() })
+  });
+};
+
 const SYSTEM_PROMPT = `당신은 전문 요리사이자 영양사입니다. 주어진 조건에 맞는 레시피 5개를 추천해주세요.
 
 반드시 아래 형식을 정확히 지켜서 답하세요.
@@ -111,7 +130,7 @@ const HEALTH_GOALS = [
 const DEFAULT_FRIDGE = ["달걀", "두부", "당근", "애호박", "브로콜리"];
 const DEFAULT_PANTRY = ["쌀", "파스타", "감자", "양파", "올리브오일"];
 const DEFAULT_FOCUS  = ["닭가슴살", "연어"];
-const SK = { FRIDGE: "aFridgeIngredients", PANTRY: "aPantryIngredients", FOCUS: "aFocusIngredients", STOCK: "aFoodStock", PLANS: "aMealPlans", SAVED: "aSavedRecipes", GOAL: "aHealthGoal", SERVINGS: "aServings" };
+const SK = { FRIDGE: "a_fridgeIngredients", PANTRY: "a_pantryIngredients", FOCUS: "a_focusIngredients", STOCK: "a_foodStock", PLANS: "a_mealPlans", SAVED: "a_savedRecipes", GOAL: "a_healthGoal", SERVINGS: "a_servings" };
 
 function SearchBar({ value, onChange, placeholder }) {
   return (
@@ -163,6 +182,7 @@ export default function RecipeApp() {
   const [recipeView, setRecipeView] = useState("search");
   const [justSaved, setJustSaved] = useState({});
   const [addedToStock, setAddedToStock] = useState({});
+  const [syncStatus, setSyncStatus] = useState("idle");
   const isComposing = useRef(false);
 
   const [aiSearchQuery, setAiSearchQuery] = useState("");
@@ -194,8 +214,9 @@ export default function RecipeApp() {
 
   useEffect(() => {
     (async () => {
+      setSyncStatus("syncing");
       try {
-        const load = async (k, def) => { try { const r = await window.storage.get(k); return r?.value ? JSON.parse(r.value) : def; } catch { return def; } };
+        const load = async (k, def) => { try { const v = await sbGet(k); return v ?? def; } catch { return def; } };
         setFridgeItems(await load(SK.FRIDGE, DEFAULT_FRIDGE));
         setPantryItems(await load(SK.PANTRY, DEFAULT_PANTRY));
         setFocusItems(await load(SK.FOCUS, DEFAULT_FOCUS));
@@ -204,11 +225,16 @@ export default function RecipeApp() {
         setSavedRecipes(await load(SK.SAVED, []));
         setHealthGoal(await load(SK.GOAL, "일반"));
         setServings(await load(SK.SERVINGS, 2));
-      } catch {}
+        setSyncStatus("synced");
+      } catch { setSyncStatus("error"); }
     })();
   }, []);
 
-  const save = useCallback(async (k, v) => { try { await window.storage.set(k, JSON.stringify(v)); } catch {} }, []);
+  const save = useCallback(async (k, v) => {
+    setSyncStatus("syncing");
+    try { await sbSet(k, v); setSyncStatus("synced"); }
+    catch { setSyncStatus("error"); }
+  }, []);
 
   const SECTIONS = [
     { key: "fridge", label: "냉장고", emoji: "🧊", color: "#0ea5e9", light: "#f0f9ff", tag: "#bae6fd" },
@@ -381,7 +407,12 @@ export default function RecipeApp() {
 
   const diffColor = d => d === "쉬움" ? "#16a34a" : d === "보통" ? "#d97706" : "#dc2626";
 
-  // ── 레시피 카드 ──
+  const SyncBadge = () => (
+    <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 10, background: syncStatus === "synced" ? "#f0fdf4" : syncStatus === "syncing" ? "#fff7ed" : "#fff1f2", color: syncStatus === "synced" ? "#166534" : syncStatus === "syncing" ? "#c2410c" : "#be123c", fontWeight: 600, border: "1px solid", borderColor: syncStatus === "synced" ? "#bbf7d0" : syncStatus === "syncing" ? "#fed7aa" : "#fecdd3" }}>
+      {syncStatus === "synced" ? "☁️ 동기화됨" : syncStatus === "syncing" ? "🔄 저장 중..." : "⚠️ 오류"}
+    </span>
+  );
+
   const RecipeCard = ({ r, idx, isSavedView = false, justSavedMap, addedToStockMap, onSave, onAddToStock }) => {
     const alreadySaved = isSavedView || savedRecipes.some(s => s.name === r.name);
     const alreadyInStock = foodStock[r.category]?.includes(r.name);
@@ -446,7 +477,6 @@ export default function RecipeApp() {
     </div>
   );
 
-  // ── 건강 목표 선택 바 (공통) ──
   const GoalBar = () => (
     <div style={{ background: "white", borderRadius: 14, padding: 16, boxShadow: "0 1px 12px rgba(0,0,0,0.07)", marginBottom: 14, border: "1px solid #f4f4f5" }}>
       <div style={{ fontSize: 11, fontWeight: 700, color: "#71717a", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>건강 목표</div>
@@ -492,21 +522,20 @@ export default function RecipeApp() {
         .suggest-chip:hover { background: #f4f4f5; border-style: solid; color: #18181b; }
       `}</style>
 
-      {/* 헤더 */}
       <div style={{ background: "white", borderBottom: "1px solid #f4f4f5", padding: "16px 20px", display: "flex", alignItems: "center", gap: 12 }}>
         <span style={{ fontSize: 28 }}>🍽</span>
         <div>
           <div style={{ fontSize: 20, fontWeight: 700, color: "#18181b", letterSpacing: "-0.02em" }}>오늘 뭐 먹지?</div>
           <div style={{ fontSize: 12, color: "#a1a1aa", marginTop: 1 }}>집 재료로 만드는 맞춤 레시피</div>
         </div>
-        <div style={{ marginLeft: "auto" }}>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          <SyncBadge />
           <span style={{ background: "#f4f4f5", borderRadius: 8, padding: "4px 10px", fontSize: 12, color: "#52525b", fontWeight: 600 }}>
             {HEALTH_GOALS.find(g => g.key === healthGoal)?.emoji} {healthGoal}
           </span>
         </div>
       </div>
 
-      {/* 탭 */}
       <div style={{ display: "flex", background: "white", borderBottom: "1px solid #f4f4f5" }}>
         {[{ key: "recipe", label: "레시피", emoji: "👨‍🍳" }, { key: "stock", label: "음식 재고", emoji: "🗂" }, { key: "plan", label: "식단 짜기", emoji: "📅" }].map(({ key, label, emoji }) => (
           <button key={key} className={`main-tab ${tab === key ? "active" : ""}`} onClick={() => setTab(key)}>
@@ -517,7 +546,6 @@ export default function RecipeApp() {
 
       <div style={{ maxWidth: 600, margin: "0 auto", padding: "20px 16px" }}>
 
-        {/* ══ 레시피 탭 ══ */}
         {tab === "recipe" && (<>
           <div style={{ display: "flex", gap: 8, marginBottom: 16, overflowX: "auto", paddingBottom: 4 }}>
             {[{ key: "search", label: "🥕 재료로 추천" }, { key: "aisearch", label: "🔍 AI 검색" }, { key: "saved", label: `🔖 저장됨${savedRecipes.length > 0 ? ` (${savedRecipes.length})` : ""}` }].map(({ key, label }) => (
@@ -525,7 +553,6 @@ export default function RecipeApp() {
             ))}
           </div>
 
-          {/* 재료 기반 추천 */}
           {recipeView === "search" && (<>
             <GoalBar />
             <div style={{ background: "white", borderRadius: 14, padding: 20, boxShadow: "0 1px 12px rgba(0,0,0,0.07)", marginBottom: 14, border: "1px solid #f4f4f5" }}>
@@ -617,7 +644,6 @@ export default function RecipeApp() {
             )}
           </>)}
 
-          {/* AI 검색 */}
           {recipeView === "aisearch" && (
             <div className="fade-in">
               <GoalBar />
@@ -652,7 +678,6 @@ export default function RecipeApp() {
             </div>
           )}
 
-          {/* 저장된 레시피 */}
           {recipeView === "saved" && (
             <div className="fade-in">
               {savedRecipes.length === 0
@@ -692,7 +717,6 @@ export default function RecipeApp() {
           )}
         </>)}
 
-        {/* ══ 음식 재고 탭 ══ */}
         {tab === "stock" && (
           <div className="fade-in">
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
@@ -775,7 +799,6 @@ export default function RecipeApp() {
           </div>
         )}
 
-        {/* ══ 식단 짜기 탭 ══ */}
         {tab === "plan" && (
           <div className="fade-in">
             <GoalBar />
